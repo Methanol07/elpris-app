@@ -1,5 +1,6 @@
 import os
 import requests
+from datetime import datetime
 from flask import Flask, jsonify, render_template_string
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -13,15 +14,15 @@ key: str = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
 def hent_og_gem_spotpriser():
-    """Henter de nyeste spotpriser fra Energi Data Service."""
-    print("Henter spotpriser...")
+    """Henter de nyeste spotpriser for i dag og i morgen fra Energi Data Service."""
+    print("Henter dagsfriske spotpriser...")
     
-    # User-Agent hjælper mod 429 rate limit fra Energi Data Service
     headers = {
         'User-Agent': 'MinElprisApp/1.0'
     }
     
-    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=100&filter={"PriceArea":["DK1","DK2"]}&sort=HourUTC desc'
+    idag_str = datetime.utcnow().strftime('%Y-%m-%d')
+    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={idag_str}T00:00&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourUTC desc'
     
     try:
         response = requests.get(api_url, headers=headers)
@@ -47,8 +48,10 @@ def hent_og_gem_spotpriser():
 
             data_to_insert = list(formatted_data.values())
             if data_to_insert:
+                # Slet gamle historiske rækker i Supabase, så vi kun har dagsaktuelle data
+                supabase.table("strompriser").delete().neq("time_start", "1970-01-01").execute()
                 supabase.table("strompriser").upsert(data_to_insert, on_conflict="time_start").execute()
-                print(f"Svar fra API! Gemt {len(data_to_insert)} timer i Supabase.")
+                print(f"Svar fra API! Gemt {len(data_to_insert)} timer for i dag.")
                 return len(data_to_insert)
         else:
             print(f"API-fejl: Statuskode {response.status_code}")
@@ -57,38 +60,131 @@ def hent_og_gem_spotpriser():
         
     return 0
 
+def beregn_prognose(data):
+    """Beregner snit, billigste og dyreste time for DK1 og DK2."""
+    if not data:
+        return None
+        
+    priser_dk1 = [r['price_dk1'] for r in data if r.get('price_dk1') is not none]
+    priser_dk2 = [r['price_dk2'] for r in data if r.get('price_dk2') is not none]
+    
+    prognose = {}
+    
+    if priser_dk1:
+        snit_dk1 = round(sum(priser_dk1) / len(priser_dk1), 2)
+        min_row_dk1 = min(data, key=lambda x: x.get('price_dk1', 999))
+        max_row_dk1 = max(data, key=lambda x: x.get('price_dk1', -999))
+        
+        prognose['dk1'] = {
+            'avg': snit_dk1,
+            'min_price': min_row_dk1['price_dk1'],
+            'min_time': min_row_dk1['time_start'][11:16],
+            'max_price': max_row_dk1['price_dk1'],
+            'max_time': max_row_dk1['time_start'][11:16]
+        }
+        
+    if priser_dk2:
+        snit_dk2 = round(sum(priser_dk2) / len(priser_dk2), 2)
+        min_row_dk2 = min(data, key=lambda x: x.get('price_dk2', 999))
+        max_row_dk2 = max(data, key=lambda x: x.get('price_dk2', -999))
+        
+        prognose['dk2'] = {
+            'avg': snit_dk2,
+            'min_price': min_row_dk2['price_dk2'],
+            'min_time': min_row_dk2['time_start'][11:16],
+            'max_price': max_row_dk2['price_dk2'],
+            'max_time': max_row_dk2['time_start'][11:16]
+        }
+        
+    return prognose
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="da">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Dagens Elpriser</title>
+    <title>⚡ Dagens Elpriser & Prognose</title>
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px 20px; display: flex; justify-content: center; }
-        .container { max-width: 700px; width: 100%; }
-        h1 { text-align: center; color: #38bdf8; margin-bottom: 8px; }
-        p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 24px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 30px 15px; display: flex; justify-content: center; }
+        .container { max-width: 750px; width: 100%; }
+        h1 { text-align: center; color: #38bdf8; margin-bottom: 6px; font-size: 1.8rem; }
+        p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 20px; font-size: 0.95rem; }
+        
+        /* Prognose Cards Grid */
+        .prognose-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 25px; }
+        .card { background: #1e293b; border-radius: 12px; padding: 18px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); border: 1px solid #334155; }
+        .card h3 { margin-top: 0; color: #38bdf8; font-size: 1.1rem; border-bottom: 1px solid #334155; padding-bottom: 8px; }
+        .stat-row { display: flex; justify-content: space-between; margin: 8px 0; font-size: 0.95rem; }
+        .stat-label { color: #94a3b8; }
+        .stat-value { font-weight: bold; }
+        .val-cheap { color: #4ade80; }
+        .val-high { color: #f87171; }
+        
         table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
-        th, td { padding: 14px 18px; text-align: center; }
-        th { background: #334155; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 0.85rem; letter-spacing: 0.05em; }
+        th, td { padding: 12px 14px; text-align: center; }
+        th { background: #334155; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.05em; }
         tr { border-bottom: 1px solid #334155; }
         tr:last-child { border-bottom: none; }
         .price-cheap { color: #4ade80; font-weight: bold; }
         .price-mid { color: #facc15; font-weight: bold; }
         .price-high { color: #f87171; font-weight: bold; }
         .time-col { font-weight: 500; color: #cbd5e1; }
-        .btn { display: inline-block; padding: 8px 16px; background: #0284c7; color: white; border-radius: 6px; text-decoration: none; font-size: 0.9rem; margin-bottom: 16px; }
+        
+        .actions { text-align: center; margin-bottom: 20px; }
+        .btn { display: inline-block; padding: 10px 20px; background: #0284c7; color: white; border-radius: 8px; text-decoration: none; font-size: 0.95rem; font-weight: 600; }
         .btn:hover { background: #0369a1; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>⚡ Dagens Elpriser</h1>
-        <p class="subtitle">Seneste elpriser for DK1 (Jylland/Fyn) og DK2 (Sjælland) i DKK/kWh</p>
-        <div style="text-align: center;">
+        <p class="subtitle">Live priser & dagsprognose (DKK/kWh)</p>
+        
+        <div class="actions">
             <a href="/opdater" class="btn">🔄 Hent nyeste data</a>
         </div>
+
+        {% if prognose %}
+        <div class="prognose-grid">
+            {% if prognose.dk1 %}
+            <div class="card">
+                <h3>📊 Prognose: Jylland / Fyn (DK1)</h3>
+                <div class="stat-row">
+                    <span class="stat-label">Gennemsnit i dag:</span>
+                    <span class="stat-value">{{ prognose.dk1.avg }} kr.</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">🟢 Billigste time (kl. {{ prognose.dk1.min_time }}):</span>
+                    <span class="stat-value val-cheap">{{ prognose.dk1.min_price }} kr.</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">🔴 Dyreste time (kl. {{ prognose.dk1.max_time }}):</span>
+                    <span class="stat-value val-high">{{ prognose.dk1.max_price }} kr.</span>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if prognose.dk2 %}
+            <div class="card">
+                <h3>📊 Prognose: Sjælland (DK2)</h3>
+                <div class="stat-row">
+                    <span class="stat-label">Gennemsnit i dag:</span>
+                    <span class="stat-value">{{ prognose.dk2.avg }} kr.</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">🟢 Billigste time (kl. {{ prognose.dk2.min_time }}):</span>
+                    <span class="stat-value val-cheap">{{ prognose.dk2.min_price }} kr.</span>
+                </div>
+                <div class="stat-row">
+                    <span class="stat-label">🔴 Dyreste time (kl. {{ prognose.dk2.max_time }}):</span>
+                    <span class="stat-value val-high">{{ prognose.dk2.max_price }} kr.</span>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
         <table>
             <thead>
                 <tr>
@@ -118,8 +214,10 @@ HTML_TEMPLATE = """
 
 @app.route('/', methods=['GET'])
 def dashboard():
-    response = supabase.table("strompriser").select("*").order("time_start", desc=True).limit(24).execute()
-    return render_template_string(HTML_TEMPLATE, priser=response.data)
+    response = supabase.table("strompriser").select("*").order("time_start", desc=True).execute()
+    data = response.data or []
+    prognose = beregn_prognose(data)
+    return render_template_string(HTML_TEMPLATE, priser=data, prognose=prognose)
 
 @app.route('/opdater', methods=['GET'])
 def opdater_manuelt():
@@ -128,11 +226,10 @@ def opdater_manuelt():
 
 @app.route('/api/priser', methods=['GET'])
 def get_priser_json():
-    response = supabase.table("strompriser").select("*").order("time_start", desc=True).limit(24).execute()
+    response = supabase.table("strompriser").select("*").order("time_start", desc=True).execute()
     return jsonify(response.data)
 
 if __name__ == '__main__':
-    # Hent data ved opstart
     try:
         hent_og_gem_spotpriser()
     except Exception as e:
