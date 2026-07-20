@@ -187,25 +187,40 @@ def laf_stats(rows):
 def dashboard():
     valgt_dag = request.args.get('dag', 'idag')
     
+    # Sæt start- og slut-tidspunkt for det valgte døgn (00:00:00 til 23:59:59)
     if valgt_dag == 'imorgen':
-        soeg_dato = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        dag_dt = datetime.now() + timedelta(days=1)
         dato_visning = "I MORGEN"
     else:
-        soeg_dato = datetime.now().strftime('%Y-%m-%d')
+        dag_dt = datetime.now()
         dato_visning = "I DAG"
         
-    response = supabase.table("strompriser").select("*").like("time_start", f"{soeg_dato}%").order("time_start", desc=False).execute()
+    start_tid = dag_dt.strftime('%Y-%m-%dT00:00:00')
+    slut_tid = dag_dt.strftime('%Y-%m-%dT23:59:59')
+        
+    # Brug gte (greater than or equal) og lte (less than or equal) i stedet for like
+    response = supabase.table("strompriser") \
+        .select("*") \
+        .gte("time_start", start_tid) \
+        .lte("time_start", slut_tid) \
+        .order("time_start", desc=False) \
+        .execute()
+        
     data = response.data or []
     
-    # Hvis databasen er helt tom for i dag, så prøv at hente automatisk én gang
+    # Hvis databasen er helt tom for i dag, prøv at hente fra API én gang
     if not data and valgt_dag == 'idag':
         hent_og_gem_spotpriser()
-        response = supabase.table("strompriser").select("*").like("time_start", f"{soeg_dato}%").order("time_start", desc=False).execute()
+        response = supabase.table("strompriser") \
+            .select("*") \
+            .gte("time_start", start_tid) \
+            .lte("time_start", slut_tid) \
+            .order("time_start", desc=False) \
+            .execute()
         data = response.data or []
         
     stats = laf_stats(data)
     return render_template_string(HTML_TEMPLATE, priser=data, stats=stats, valgt_dag=valgt_dag, dato_visning=dato_visning)
-
 @app.route('/opdater', methods=['GET'])
 def opdater_manuelt():
     valgt_dag = request.args.get('dag', 'idag')
