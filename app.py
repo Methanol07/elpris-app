@@ -14,24 +14,18 @@ key: str = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
 def hent_og_gem_spotpriser():
-    """Henter priser fra i dag og frem (inkl. i morgen hvis tilgængelig)."""
-    print("Forsøger at hente spotpriser...")
-    
+    """Henter faktiske spotpriser fra i dag og i morgen."""
     headers = {'User-Agent': 'MinElprisApp/1.0'}
-    
-    # Hent fra dags dato kl 00:00
     idag_str = datetime.now().strftime('%Y-%m-%d')
-    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={idag_str}T00:00&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourUTC asc'
+    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={idag_str}T00:00&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourDK asc'
     
     try:
         response = requests.get(api_url, headers=headers, timeout=10)
-        
         if response.status_code == 200:
             records = response.json().get('records', [])
             formatted_data = {}
-            
             for item in records:
-                time_start = item['HourDK']  # Brug lokal dansk tid
+                time_start = item['HourDK']
                 area = item['PriceArea']
                 price_dkk = round((item['SpotPriceEUR'] * 7.45) / 1000, 2)
                 
@@ -45,19 +39,63 @@ def hent_og_gem_spotpriser():
 
             data_to_insert = list(formatted_data.values())
             if data_to_insert:
-                # Gem/opdater i Supabase uten at slette alt råt først
                 supabase.table("strompriser").upsert(data_to_insert, on_conflict="time_start").execute()
-                print(f"Succes! Hentede og gemte {len(data_to_insert)} timer.")
-                return True
-        else:
-            print(f"API sendte status: {response.status_code} (bruger eksisterende data)")
     except Exception as e:
-        print(f"Netværksfejl ved hentning: {e}")
+        print(f"Fejl ved spotpriser: {e}")
+
+def hent_3dags_prognose():
+    """Beregner en estimeret prismodel (Lav/Medium/Høj) 3 dage frem baseret på vindprognoser."""
+    headers = {'User-Agent': 'MinElprisApp/1.0'}
+    idag = datetime.now()
+    start_str = idag.strftime('%Y-%m-%d')
+    
+    # Hent vindprognose for Danmark
+    api_url = f'https://api.energidataservice.dk/dataset/WindPower5MinForecast?start={start_str}T00:00&sort=ForecastDay asc'
+    
+    prognoser = []
+    try:
+        res = requests.get(api_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            records = res.json().get('records', [])
+            
+            # Gruppér per dag
+            dags_vind = {}
+            for r in records:
+                dato = r.get('ForecastDay', '')[:10]
+                mwh = r.get('ForecastMWh', 0) or 0
+                if dato not in dags_vind:
+                    dags_vind[dato] = []
+                dags_vind[dato].append(mwh)
+            
+            for d in sorted(dags_vind.keys())[:3]:
+                snit_mwh = sum(dags_vind[d]) / len(dags_vind[d]) if dags_vind[d] else 0
+                
+                # Estimer niveau baseret på vindproduktion
+                if snit_mwh > 2000:
+                    niveau = "Lav (Billig strøm)"
+                    farve = "#4ade80"
+                    ikon = "🟢"
+                elif snit_mwh > 1000:
+                    niveau = "Normal / Medium"
+                    farve = "#facc15"
+                    ikon = "🟡"
+                else:
+                    niveau = "Høj (Dyr strøm)"
+                    farve = "#f87171"
+                    ikon = "🔴"
+                    
+                prognoser.append({
+                    'dato': d,
+                    'niveau': niveau,
+                    'farve': farve,
+                    'ikon': ikon
+                })
+    except Exception as e:
+        print(f"Fejl ved prognose: {e}")
         
-    return False
+    return prognoser
 
 def beregn_nøgletal(data):
-    """Opdeler data i I DAG og I MORGEN og beregner gennemsnit + ekstremer."""
     idag_str = datetime.now().strftime('%Y-%m-%d')
     imorgen_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
     
@@ -67,30 +105,17 @@ def beregn_nøgletal(data):
     def laf_stats(rows):
         if not rows:
             return None
-        dk1_priser = [r['price_dk1'] for r in rows if r.get('price_dk1') is not None]
-        dk2_priser = [r['price_dk2'] for r in rows if r.get('price_dk2') is not None]
-        
+        dk1 = [r['price_dk1'] for r in rows if r.get('price_dk1') is not None]
+        dk2 = [r['price_dk2'] for r in rows if r.get('price_dk2') is not None]
         res = {}
-        if dk1_priser:
+        if dk1:
             min_r = min(rows, key=lambda x: x.get('price_dk1', 99))
             max_r = max(rows, key=lambda x: x.get('price_dk1', -99))
-            res['dk1'] = {
-                'avg': round(sum(dk1_priser)/len(dk1_priser), 2),
-                'min': min_r['price_dk1'],
-                'min_t': min_r['time_start'][11:16],
-                'max': max_r['price_dk1'],
-                'max_t': max_r['time_start'][11:16]
-            }
-        if dk2_priser:
+            res['dk1'] = {'avg': round(sum(dk1)/len(dk1), 2), 'min': min_r['price_dk1'], 'min_t': min_r['time_start'][11:16], 'max': max_r['price_dk1'], 'max_t': max_r['time_start'][11:16]}
+        if dk2:
             min_r = min(rows, key=lambda x: x.get('price_dk2', 99))
             max_r = max(rows, key=lambda x: x.get('price_dk2', -99))
-            res['dk2'] = {
-                'avg': round(sum(dk2_priser)/len(dk2_priser), 2),
-                'min': min_r['price_dk2'],
-                'min_t': min_r['time_start'][11:16],
-                'max': max_r['price_dk2'],
-                'max_t': max_r['time_start'][11:16]
-            }
+            res['dk2'] = {'avg': round(sum(dk2)/len(dk2), 2), 'min': min_r['price_dk2'], 'min_t': min_r['time_start'][11:16], 'max': max_r['price_dk2'], 'max_t': max_r['time_start'][11:16]}
         return res
 
     return {
@@ -105,15 +130,21 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Dagens & Morgendagens Elpriser</title>
+    <title>⚡ Elpriser & 3-Dages Prognose</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px 15px; display: flex; justify-content: center; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px 15px; display: flex; justify-content: center; }
         .container { max-width: 650px; width: 100%; }
         h1 { text-align: center; color: #38bdf8; margin-bottom: 4px; font-size: 1.6rem; }
         p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 20px; font-size: 0.9rem; }
         
         .card { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 20px; border: 1px solid #334155; }
         .card h3 { margin: 0 0 12px 0; color: #38bdf8; font-size: 1.05rem; border-bottom: 1px solid #334155; padding-bottom: 6px; }
+        
+        /* 3-Dages Trend Grid */
+        .trend-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center; }
+        .trend-box { background: #0f172a; padding: 12px 8px; border-radius: 8px; border: 1px solid #334155; }
+        .trend-date { font-size: 0.8rem; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
+        .trend-status { font-weight: bold; font-size: 0.85rem; }
         
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .stat-box { background: #0f172a; padding: 10px; border-radius: 8px; font-size: 0.85rem; }
@@ -132,18 +163,32 @@ HTML_TEMPLATE = """
         
         .btn-wrap { text-align: center; margin-bottom: 18px; }
         .btn { display: inline-block; padding: 10px 18px; background: #0284c7; color: white; border-radius: 8px; text-decoration: none; font-size: 0.9rem; font-weight: 600; }
-        
-        .notice { background: #334155; padding: 10px; border-radius: 8px; text-align: center; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 15px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>⚡ Elpriser & Oversigt</h1>
-        <p class="subtitle">DKK pr. kWh (Spotpris uden afgifter/tarif)</p>
+        <h1>⚡ Elpriser & Prognose</h1>
+        <p class="subtitle">Live priser og 3-dages forventet prisniveau</p>
         
         <div class="btn-wrap">
             <a href="/opdater" class="btn">🔄 Opdater data</a>
         </div>
+
+        <!-- 3-DAGES TENDENS / PROGNOSE -->
+        {% if trend %}
+        <div class="card">
+            <h3>🔮 3-Dages Forventet Prisniveau (Prognose)</h3>
+            <div class="trend-grid">
+                {% for t in trend %}
+                <div class="trend-box">
+                    <div class="trend-date">{{ t.dato }}</div>
+                    <div style="font-size: 1.4rem; margin-bottom: 4px;">{{ t.ikon }}</div>
+                    <div class="trend-status" style="color: {{ t.farve }}">{{ t.niveau }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endif %}
 
         {% if stats.idag %}
         <div class="card">
@@ -166,34 +211,6 @@ HTML_TEMPLATE = """
                 </div>
                 {% endif %}
             </div>
-        </div>
-        {% endif %}
-
-        {% if stats.har_imorgen %}
-        <div class="card">
-            <h3>🔮 Prognose / Priser for I MORGEN</h3>
-            <div class="grid">
-                {% if stats.imorgen.dk1 %}
-                <div class="stat-box">
-                    <div class="stat-title">DK1 (Jylland/Fyn)</div>
-                    <div>Snit: <b>{{ stats.imorgen.dk1.avg }} kr</b></div>
-                    <div>🟢 Lavest: <span class="val-cheap">{{ stats.imorgen.dk1.min }} kr</span> (kl. {{ stats.imorgen.dk1.min_t }})</div>
-                    <div>🔴 Højest: <span class="val-high">{{ stats.imorgen.dk1.max }} kr</span> (kl. {{ stats.imorgen.dk1.max_t }})</div>
-                </div>
-                {% endif %}
-                {% if stats.imorgen.dk2 %}
-                <div class="stat-box">
-                    <div class="stat-title">DK2 (Sjælland)</div>
-                    <div>Snit: <b>{{ stats.imorgen.dk2.avg }} kr</b></div>
-                    <div>🟢 Lavest: <span class="val-cheap">{{ stats.imorgen.dk2.min }} kr</span> (kl. {{ stats.imorgen.dk2.min_t }})</div>
-                    <div>🔴 Højest: <span class="val-high">{{ stats.imorgen.dk2.max }} kr</span> (kl. {{ stats.imorgen.dk2.max_t }})</div>
-                </div>
-                {% endif %}
-            </div>
-        </div>
-        {% else %}
-        <div class="notice">
-            ℹ️ Priser for i morgen offentliggøres af Nord Pool hver dag omkring kl. 13:00.
         </div>
         {% endif %}
 
@@ -226,13 +243,14 @@ HTML_TEMPLATE = """
 
 @app.route('/', methods=['GET'])
 def dashboard():
-    # Hent kun historik fra dags dato og frem
     idag_str = datetime.now().strftime('%Y-%m-%d')
     response = supabase.table("strompriser").select("*").gte("time_start", idag_str).order("time_start", desc=False).execute()
     data = response.data or []
     
     stats = beregn_nøgletal(data)
-    return render_template_string(HTML_TEMPLATE, priser=data, stats=stats)
+    trend = hent_3dags_prognose()
+    
+    return render_template_string(HTML_TEMPLATE, priser=data, stats=stats, trend=trend)
 
 @app.route('/opdater', methods=['GET'])
 def opdater_manuelt():
