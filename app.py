@@ -65,15 +65,15 @@ def beregn_prognose(data):
     if not data:
         return None
         
-    priser_dk1 = [r['price_dk1'] for r in data if r.get('price_dk1') is not none]
-    priser_dk2 = [r['price_dk2'] for r in data if r.get('price_dk2') is not none]
+    priser_dk1 = [r['price_dk1'] for r in data if r.get('price_dk1') is not None]
+    priser_dk2 = [r['price_dk2'] for r in data if r.get('price_dk2') is not None]
     
     prognose = {}
     
     if priser_dk1:
         snit_dk1 = round(sum(priser_dk1) / len(priser_dk1), 2)
-        min_row_dk1 = min(data, key=lambda x: x.get('price_dk1', 999))
-        max_row_dk1 = max(data, key=lambda x: x.get('price_dk1', -999))
+        min_row_dk1 = min(data, key=lambda x: x.get('price_dk1') if x.get('price_dk1') is not None else 999)
+        max_row_dk1 = max(data, key=lambda x: x.get('price_dk1') if x.get('price_dk1') is not None else -999)
         
         prognose['dk1'] = {
             'avg': snit_dk1,
@@ -85,8 +85,8 @@ def beregn_prognose(data):
         
     if priser_dk2:
         snit_dk2 = round(sum(priser_dk2) / len(priser_dk2), 2)
-        min_row_dk2 = min(data, key=lambda x: x.get('price_dk2', 999))
-        max_row_dk2 = max(data, key=lambda x: x.get('price_dk2', -999))
+        min_row_dk2 = min(data, key=lambda x: x.get('price_dk2') if x.get('price_dk2') is not None else 999)
+        max_row_dk2 = max(data, key=lambda x: x.get('price_dk2') if x.get('price_dk2') is not None else -999)
         
         prognose['dk2'] = {
             'avg': snit_dk2,
