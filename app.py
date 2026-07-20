@@ -1,7 +1,7 @@
 import os
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, render_template_string, request
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -14,22 +14,27 @@ key: str = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(url, key)
 
 def hent_og_gem_spotpriser():
-    """Henter dagsaktuelle og kommende spotpriser fra Energi Data Service."""
+    """Henter spotpriser for de seneste og kommende dage fra Energi Data Service."""
     headers = {'User-Agent': 'MinElprisApp/1.0'}
     
-    # Hent fra 1 dag tilbage for at dække alle tidszoner ordentligt
-    start_dato = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={start_dato}T00:00&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourDK asc'
+    # Hent fra 2 dage siden til i dag/i morgen
+    fra_dato = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={fra_dato}&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourDK asc'
     
     try:
-        res = requests.get(api_url, headers=headers, timeout=8)
+        res = requests.get(api_url, headers=headers, timeout=10)
         if res.status_code == 200:
             records = res.json().get('records', [])
             formatted = {}
             for item in records:
                 time_start = item['HourDK']
                 area = item['PriceArea']
-                price_dkk = round((item['SpotPriceEUR'] * 7.45) / 1000, 2)
+                spot_eur = item.get('SpotPriceEUR')
+                
+                if spot_eur is None:
+                    continue
+                    
+                price_dkk = round((spot_eur * 7.45) / 1000, 2)
                 
                 if time_start not in formatted:
                     formatted[time_start] = {"time_start": time_start}
@@ -45,8 +50,36 @@ def hent_og_gem_spotpriser():
                 print(f"Gemte {len(data_to_insert)} rækker i Supabase.")
                 return True
     except Exception as e:
-        print(f"API Fejl: {e}")
+        print(f"Fejl ved opdatering af spotpriser: {e}")
     return False
+
+def laf_stats(rows):
+    if not rows:
+        return None
+    dk1 = [r['price_dk1'] for r in rows if r.get('price_dk1') is not None]
+    dk2 = [r['price_dk2'] for r in rows if r.get('price_dk2') is not None]
+    res = {}
+    if dk1:
+        min_r = min(rows, key=lambda x: x.get('price_dk1', 99))
+        max_r = max(rows, key=lambda x: x.get('price_dk1', -99))
+        res['dk1'] = {
+            'avg': round(sum(dk1)/len(dk1), 2),
+            'min': min_r['price_dk1'],
+            'min_t': str(min_r['time_start'])[11:16],
+            'max': max_r['price_dk1'],
+            'max_t': str(max_r['time_start'])[11:16]
+        }
+    if dk2:
+        min_r = min(rows, key=lambda x: x.get('price_dk2', 99))
+        max_r = max(rows, key=lambda x: x.get('price_dk2', -99))
+        res['dk2'] = {
+            'avg': round(sum(dk2)/len(dk2), 2),
+            'min': min_r['price_dk2'],
+            'min_t': str(min_r['time_start'])[11:16],
+            'max': max_r['price_dk2'],
+            'max_t': str(max_r['time_start'])[11:16]
+        }
+    return res
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -54,16 +87,15 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Dagens Elpriser</title>
+    <title>⚡ Elpriser & Oversigt</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px 15px; display: flex; justify-content: center; }
-        .container { max-width: 650px; width: 100%; }
+        .container { max-width: 700px; width: 100%; }
         h1 { text-align: center; color: #38bdf8; margin-bottom: 4px; font-size: 1.6rem; }
         p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 20px; font-size: 0.9rem; }
         
-        /* Dato Valg Knapper */
         .date-selector { display: flex; gap: 8px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
-        .date-btn { padding: 10px 16px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 8px; text-decoration: none; font-size: 0.9rem; font-weight: 600; transition: all 0.2s; }
+        .date-btn { padding: 10px 14px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 8px; text-decoration: none; font-size: 0.85rem; font-weight: 600; transition: all 0.2s; }
         .date-btn:hover { background: #334155; color: white; }
         .date-btn.active { background: #0284c7; color: white; border-color: #38bdf8; }
         
@@ -88,27 +120,30 @@ HTML_TEMPLATE = """
         .btn-wrap { text-align: center; margin-bottom: 18px; }
         .btn-update { display: inline-block; padding: 8px 14px; background: #334155; color: #cbd5e1; border-radius: 6px; text-decoration: none; font-size: 0.8rem; }
         .btn-update:hover { background: #475569; color: white; }
-        .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; }
+        .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; line-height: 1.6; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>⚡ Elpriser & Oversigt</h1>
-        <p class="subtitle">Klik på en dag for at se priserne</p>
+        <h1>⚡ Elpriser & Prognose</h1>
+        <p class="subtitle">Vælg en dag for at se priser eller forventet niveau</p>
         
-        <!-- DATO KNAPPER -->
+        <!-- KNAPPER TIL DAGE (I DAG, I MORGEN, +2 DAGE, +3 DAGE) -->
         <div class="date-selector">
-            <a href="/?dag=idag" class="date-btn {% if valgt_dag == 'idag' %}active{% endif %}">📅 I dag</a>
-            <a href="/?dag=imorgen" class="date-btn {% if valgt_dag == 'imorgen' %}active{% endif %}">🔮 I morgen</a>
+            {% for d in dags_knapper %}
+            <a href="/?offset={{ d.offset }}" class="date-btn {% if valgt_offset == d.offset %}active{% endif %}">
+                {{ d.label }} ({{ d.dato_str }})
+            </a>
+            {% endfor %}
         </div>
 
         <div class="btn-wrap">
-            <a href="/opdater?dag={{ valgt_dag }}" class="btn-update">🔄 Tving genhentning af data</a>
+            <a href="/opdater?offset={{ valgt_offset }}" class="btn-update">🔄 Hent seneste priser fra API</a>
         </div>
 
         {% if stats %}
         <div class="card">
-            <h3>📊 Nøgletal for {{ dato_visning }}</h3>
+            <h3>📊 Nøgletal for {{ dato_overskrift }}</h3>
             <div class="grid">
                 {% if stats.dk1 %}
                 <div class="stat-box">
@@ -142,11 +177,11 @@ HTML_TEMPLATE = """
             <tbody>
                 {% for row in priser %}
                 <tr>
-                    <td style="color:#94a3b8;">{{ row.time_start.replace('T', ' kl. ')[:16] }}</td>
-                    <td class="{% if row.price_dk1 and row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 and row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}">
+                    <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ')[:16] }}</td>
+                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                     </td>
-                    <td class="{% if row.price_dk2 and row.price_dk2 < 0.8 %}price-cheap{% elif row.price_dk2 and row.price_dk2 < 1.5 %}price-mid{% else %}price-high{% endif %}">
+                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 0.8 %}price-cheap{% elif row.price_dk2 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk2 if row.price_dk2 is not none else '-' }} kr.
                     </td>
                 </tr>
@@ -155,10 +190,13 @@ HTML_TEMPLATE = """
         </table>
         {% else %}
         <div class="no-data">
-            {% if valgt_dag == 'imorgen' %}
-                ℹ️ Priser for i morgen er endnu ikke udgivet af Nord Pool.<br><small>(Udgives normalt kl. 13:00)</small>
+            {% if valgt_offset > 1 %}
+                🔮 <b>Prognose for {{ dato_overskrift }}:</b><br>
+                Børsen (Nord Pool) udgiver kun endelige timepriser for 1 dag ad gangen (udgives dagligt kl. 13:00).<br>
+                Forventede priser 2-3 dage frem følger den generelle vind- og solprognose.
             {% else %}
-                ⚠️ Ingen data fundet. Tryk på "Tving genhentning af data" ovenfor.
+                ⚠️ Ingen gemte data for denne dag endnu.<br>
+                Tryk på knappen <b>"🔄 Hent seneste priser fra API"</b> ovenfor.
             {% endif %}
         </div>
         {% endif %}
@@ -167,64 +205,63 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def laf_stats(rows):
-    if not rows:
-        return None
-    dk1 = [r['price_dk1'] for r in rows if r.get('price_dk1') is not None]
-    dk2 = [r['price_dk2'] for r in rows if r.get('price_dk2') is not None]
-    res = {}
-    if dk1:
-        min_r = min(rows, key=lambda x: x.get('price_dk1', 99))
-        max_r = max(rows, key=lambda x: x.get('price_dk1', -99))
-        res['dk1'] = {'avg': round(sum(dk1)/len(dk1), 2), 'min': min_r['price_dk1'], 'min_t': min_r['time_start'][11:16], 'max': max_r['price_dk1'], 'max_t': max_r['time_start'][11:16]}
-    if dk2:
-        min_r = min(rows, key=lambda x: x.get('price_dk2', 99))
-        max_r = max(rows, key=lambda x: x.get('price_dk2', -99))
-        res['dk2'] = {'avg': round(sum(dk2)/len(dk2), 2), 'min': min_r['price_dk2'], 'min_t': min_r['time_start'][11:16], 'max': max_r['price_dk2'], 'max_t': max_r['time_start'][11:16]}
-    return res
-
 @app.route('/', methods=['GET'])
 def dashboard():
-    valgt_dag = request.args.get('dag', 'idag')
+    try:
+        offset = int(request.args.get('offset', 0))
+    except ValueError:
+        offset = 0
+
+    idag = datetime.now()
+    valgt_dato = idag + timedelta(days=offset)
+    mål_dato_str = valgt_dato.strftime('%Y-%m-%d')
     
-    # Sæt start- og slut-tidspunkt for det valgte døgn (00:00:00 til 23:59:59)
-    if valgt_dag == 'imorgen':
-        dag_dt = datetime.now() + timedelta(days=1)
-        dato_visning = "I MORGEN"
-    else:
-        dag_dt = datetime.now()
-        dato_visning = "I DAG"
+    # Byg knapper for I dag (0), I morgen (+1), Dag 3 (+2), Dag 4 (+3)
+    dags_knapper = []
+    labels = ["I dag", "I morgen"]
+    for i in range(4):
+        d = idag + timedelta(days=i)
+        lbl = labels[i] if i < len(labels) else f"+{i} dage"
+        dags_knapper.append({
+            'offset': i,
+            'label': lbl,
+            'dato_str': d.strftime('%d/%m')
+        })
         
-    start_tid = dag_dt.strftime('%Y-%m-%dT00:00:00')
-    slut_tid = dag_dt.strftime('%Y-%m-%dT23:59:59')
-        
-    # Brug gte (greater than or equal) og lte (less than or equal) i stedet for like
-    response = supabase.table("strompriser") \
-        .select("*") \
-        .gte("time_start", start_tid) \
-        .lte("time_start", slut_tid) \
-        .order("time_start", desc=False) \
-        .execute()
-        
-    data = response.data or []
+    dato_overskrift = valgt_dato.strftime('%d-%m-%Y')
     
-    # Hvis databasen er helt tom for i dag, prøv at hente fra API én gang
-    if not data and valgt_dag == 'idag':
+    # Hent alle rækker fra Supabase og filtrér direkte i Python (undgår PostgreSQL timezone-konflikter)
+    response = supabase.table("strompriser").select("*").execute()
+    alle_data = response.data or []
+    
+    # Filtrér rækker, der matcher den valgte dato
+    data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
+    data.sort(key=lambda x: str(x.get('time_start', '')))
+    
+    # Hvis databasen er tom for i dag, hent automatisk fra API
+    if not data and offset == 0:
         hent_og_gem_spotpriser()
-        response = supabase.table("strompriser") \
-            .select("*") \
-            .gte("time_start", start_tid) \
-            .lte("time_start", slut_tid) \
-            .order("time_start", desc=False) \
-            .execute()
-        data = response.data or []
+        response = supabase.table("strompriser").select("*").execute()
+        alle_data = response.data or []
+        data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
+        data.sort(key=lambda x: str(x.get('time_start', '')))
         
     stats = laf_stats(data)
-    return render_template_string(HTML_TEMPLATE, priser=data, stats=stats, valgt_dag=valgt_dag, dato_visning=dato_visning)
+    
+    return render_template_string(
+        HTML_TEMPLATE,
+        priser=data,
+        stats=stats,
+        valgt_offset=offset,
+        dags_knapper=dags_knapper,
+        dato_overskrift=dato_overskrift,
+        str=str
+    )
+
 @app.route('/opdater', methods=['GET'])
 def opdater_manuelt():
-    valgt_dag = request.args.get('dag', 'idag')
     hent_og_gem_spotpriser()
+    offset = request.args.get('offset', 0)
     return dashboard()
 
 if __name__ == '__main__':
