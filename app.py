@@ -1,16 +1,32 @@
+import time
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
+# Global cache variabler
+CACHE_DATA = None
+CACHE_TIME = 0
+CACHE_DURATION = 600  # Gemmer data i 10 minutter (600 sekunder)
+
 def hent_spotpriser():
-    headers = {'User-Agent': 'MinElprisApp/1.0'}
+    global CACHE_DATA, CACHE_TIME
     
-    # Hent de seneste rækker direkte uden avancerede filtre
-    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=50&sort=HourDK desc'
+    # Hvis vi har frisk data i cachen, så brug det med det samme!
+    nu = time.time()
+    if CACHE_DATA and (nu - CACHE_TIME) < CACHE_DURATION:
+        print("--- BRUGER CACHED DATA ---")
+        return CACHE_DATA
+
+    # Unik User-Agent så API'et ikke blokerer os
+    headers = {
+        'User-Agent': 'MinPrivateElprisApp/2.0 (kontakt@minelpris.dk)'
+    }
     
-    print(f"--- KALDERS API: {api_url} ---")
+    # Hent de seneste rækker
+    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=200&sort=HourDK desc'
+    print(f"--- KALDER API DOKUMENT: {api_url} ---")
     
     formatted = {}
     try:
@@ -19,8 +35,6 @@ def hent_spotpriser():
         
         if res.status_code == 200:
             records = res.json().get('records', [])
-            print(f"--- ANTAL RÆKKER FRA API: {len(records)} ---")
-            
             for item in records:
                 time_start = item.get('HourDK', '')
                 area = item.get('PriceArea')
@@ -38,12 +52,16 @@ def hent_spotpriser():
                     formatted[time_start]["price_dk1"] = price_dkk
                 elif area == "DK2":
                     formatted[time_start]["price_dk2"] = price_dkk
+                    
+            CACHE_DATA = list(formatted.values())
+            CACHE_TIME = nu
+        else:
+            print(f"--- ADVARSEL: Modtog statuskode {res.status_code} fra Energi Data Service ---")
+            
     except Exception as e:
         print(f"--- API FEJL: {e} ---")
         
-    data = list(formatted.values())
-    print(f"--- UNIKKE TIDSPUNKTER SAMLET: {len(data)} ---")
-    return data
+    return CACHE_DATA or []
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -51,50 +69,72 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>⚡ Elpriser Test</title>
+    <title>⚡ Elpriser Live</title>
     <style>
-        body { font-family: sans-serif; background: #0f172a; color: white; padding: 20px; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 8px; border: 1px solid #334155; text-align: center; }
-        .date-btn { padding: 8px 12px; background: #334155; color: white; text-decoration: none; border-radius: 4px; margin-right: 5px; }
-        .active { background: #0284c7; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px 15px; display: flex; justify-content: center; }
+        .container { max-width: 650px; width: 100%; }
+        h1 { text-align: center; color: #38bdf8; margin-bottom: 4px; }
+        p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 20px; font-size: 0.9rem; }
+        
+        .date-selector { display: flex; gap: 8px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
+        .date-btn { padding: 10px 14px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 0.85rem; }
+        .date-btn.active { background: #0284c7; color: white; border-color: #38bdf8; }
+        
+        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }
+        th, td { padding: 10px 12px; text-align: center; font-size: 0.9rem; }
+        th { background: #334155; color: #94a3b8; }
+        tr { border-bottom: 1px solid #334155; }
+        
+        .price-cheap { color: #4ade80; font-weight: bold; }
+        .price-mid { color: #facc15; font-weight: bold; }
+        .price-high { color: #f87171; font-weight: bold; }
+        
+        .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; }
     </style>
 </head>
 <body>
-    <h1>⚡ Elpriser Live Test</h1>
-    <p>Valgt dato-match: <b>{{ mål_dato }}</b></p>
-    
-    <div>
-        {% for d in dags_knapper %}
-        <a href="/?offset={{ d.offset }}" class="date-btn {% if valgt_offset == d.offset %}active{% endif %}">
-            {{ d.label }} ({{ d.dato_str }})
-        </a>
-        {% endfor %}
-    </div>
-
-    {% if priser %}
-    <table>
-        <thead>
-            <tr>
-                <th>Tid (HourDK)</th>
-                <th>DK1 (kr)</th>
-                <th>DK2 (kr)</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for row in priser %}
-            <tr>
-                <td>{{ row.time_start }}</td>
-                <td>{{ row.price_dk1 }}</td>
-                <td>{{ row.price_dk2 }}</td>
-            </tr>
+    <div class="container">
+        <h1>⚡ Elpriser Live</h1>
+        <p class="subtitle">Direkte fra Energi Data Service</p>
+        
+        <div class="date-selector">
+            {% for d in dags_knapper %}
+            <a href="/?offset={{ d.offset }}" class="date-btn {% if valgt_offset == d.offset %}active{% endif %}">
+                {{ d.label }} ({{ d.dato_str }})
+            </a>
             {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p style="color: #f87171; margin-top: 20px;">⚠️ Ingen rækker matchede datoen: <b>{{ mål_dato }}</b></p>
-    <p>Tjek din Render-log for at se, hvilke datoer API'et reelt afleverede!</p>
-    {% endif %}
+        </div>
+
+        {% if priser %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Tidspunkt</th>
+                    <th>DK1 (Jylland/Fyn)</th>
+                    <th>DK2 (Sjælland)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in priser %}
+                <tr>
+                    <td style="color:#94a3b8;">{{ row.time_start.replace('T', ' kl. ')[:16] }}</td>
+                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                        {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
+                    </td>
+                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 0.8 %}price-cheap{% elif row.price_dk2 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                        {{ row.price_dk2 if row.price_dk2 is not none else '-' }} kr.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="no-data">
+            ℹ️ Ingen data tilgængelige for datoen <b>{{ mål_dato }}</b> endnu.<br>
+            <small>(Spotpriser udgives dagligt omkring kl. 13:00)</small>
+        </div>
+        {% endif %}
+    </div>
 </body>
 </html>
 """
@@ -123,7 +163,7 @@ def dashboard():
         
     alle_data = hent_spotpriser()
     
-    # Filtrer på dato
+    # Filtrer på valgt dato
     data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
     data.sort(key=lambda x: str(x.get('time_start', '')))
     
