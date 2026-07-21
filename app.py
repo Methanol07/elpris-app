@@ -172,8 +172,13 @@ def dashboard():
         
     alle_data = hent_spotpriser()
     
-    # Filtrer på valgt dato
+    # Prøv at filtrere på den valgte dato
     data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
+    
+    # Hvis datomatch var tom, viser vi bare ALLE hentede rækker i stedet for en tom skærm!
+    if not data and alle_data:
+        data = alle_data
+        
     data.sort(key=lambda x: str(x.get('time_start', '')))
     
     return render_template_string(
