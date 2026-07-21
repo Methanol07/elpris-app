@@ -14,9 +14,9 @@ def beregn_nettarif_og_afgift(time_hour):
     elafgift = 0.01  # Sommer-elafgift
     
     if 0 <= time_hour < 6:
-        nettarif = 0.25  # Nat (Laveste omkostning: ~0,26 kr samlet)
+        nettarif = 0.25  # Nat
     elif 17 <= time_hour < 21:
-        nettarif = 0.57  # Aftenspids (Højeste omkostning: ~0,58 kr samlet)
+        nettarif = 0.57  # Aftenspids
     else:
         nettarif = 0.33  # Dag/Middag
         
@@ -40,6 +40,9 @@ def hent_samlet_dagsdata(dato_dt, med_afgifter=False):
     data_dk1 = hent_priser_for_dato_og_omraade(dato_dt, "DK1")
     data_dk2 = hent_priser_for_dato_og_omraade(dato_dt, "DK2")
     
+    if not data_dk1 and not data_dk2:
+        return []
+
     formatted = {}
     
     for item in data_dk1:
@@ -134,7 +137,6 @@ HTML_TEMPLATE = """
         h1 { text-align: center; color: #38bdf8; margin-bottom: 4px; }
         p.subtitle { text-align: center; color: #94a3b8; margin-bottom: 15px; font-size: 0.9rem; }
         
-        /* Toggle Switch Styling */
         .toggle-box { display: flex; justify-content: center; align-items: center; gap: 10px; margin-bottom: 20px; background: #1e293b; padding: 10px 16px; border-radius: 30px; border: 1px solid #334155; width: fit-content; margin-left: auto; margin-right: auto; }
         .toggle-text { font-size: 0.85rem; font-weight: 600; color: #94a3b8; }
         .toggle-text.active { color: #38bdf8; }
@@ -169,7 +171,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>⚡ Elpriser & Prognose</h1>
+        <h1>⚡ Elpriser & Vejrprognose</h1>
         <p class="subtitle">
             {% if med_afgifter %}
                 <b>Inkl. Elafgift & Nettariffer (Estimeret Slutpris)</b>
@@ -178,7 +180,6 @@ HTML_TEMPLATE = """
             {% endif %}
         </p>
         
-        <!-- Toggle Knap -->
         <div class="toggle-box">
             <span class="toggle-text {% if not med_afgifter %}active{% endif %}">Spotpris</span>
             <label class="switch">
@@ -279,6 +280,10 @@ def dashboard():
         data = beregn_vejr_prognose(valgt_dato, med_afgifter=med_afgifter)
     else:
         data = hent_samlet_dagsdata(valgt_dato, med_afgifter=med_afgifter)
+        # Hvis listen er tom for 'i morgen', slår vi over på vejrprognosen!
+        if not data and offset == 1:
+            data = beregn_vejr_prognose(valgt_dato, med_afgifter=med_afgifter)
+            er_prognose = True
     
     return render_template_string(
         HTML_TEMPLATE,
