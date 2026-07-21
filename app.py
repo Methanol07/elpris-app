@@ -45,7 +45,6 @@ def hent_samlet_dagsdata(dato_dt):
 
 def beregn_vejr_prognose(dato_dt):
     """Henter vejrudsigten fra Open-Meteo og estimerer elprisen ud fra vind og sol."""
-    # Koordinater for Danmark (ca. Midtjylland)
     lat, lon = 56.0, 10.0
     dato_str = dato_dt.strftime('%Y-%m-%d')
     
@@ -61,9 +60,10 @@ def beregn_vejr_prognose(dato_dt):
             soler = data.get('direct_radiation', [])
             
             for i in range(len(tider)):
-                time_iso = tider[i] # YYYY-MM-DDTHH:00
-                time_dt = datetime.strptime(time_iso, '%Y-%m-%dT%H:%00')
-                time_hour = time_dt.hour
+                time_iso = tider[i] # f.eks. '2026-07-23T14:00'
+                
+                # Udtræk timen som et heltal direkte fra strengen
+                time_hour = int(time_iso.split('T')[1].split(':')[0])
                 
                 vind = vinde[i] if i < len(vinde) else 15
                 sol = soler[i] if i < len(soler) else 0
@@ -71,25 +71,25 @@ def beregn_vejr_prognose(dato_dt):
                 # Basis elpris inkl moms (1,20 kr)
                 estimeret_pris = 1.20
                 
-                # 1. Vindeffekt (Mere vind = lavere pris)
+                # 1. Vindeffekt
                 if vind > 35:
-                    estimeret_pris -= 0.45  # Kraftig blæst
+                    estimeret_pris -= 0.45
                 elif vind > 25:
-                    estimeret_pris -= 0.25  # God vind
+                    estimeret_pris -= 0.25
                 elif vind < 10:
-                    estimeret_pris += 0.35  # Vindstille
+                    estimeret_pris += 0.35
                     
-                # 2. Soleffekt (Solcelleproduktion midt på dagen)
+                # 2. Soleffekt
                 if sol > 300 and 10 <= time_hour <= 16:
                     estimeret_pris -= 0.20
                     
-                # 3. Forbrugsmønster (Kogetoppe & morgen/aften)
+                # 3. Spidsbelastning
                 if 17 <= time_hour <= 20:
-                    estimeret_pris += 0.40  # Aftenspids
+                    estimeret_pris += 0.40
                 elif 7 <= time_hour <= 9:
-                    estimeret_pris += 0.20  # Morgenspids
+                    estimeret_pris += 0.20
                 elif 0 <= time_hour <= 5:
-                    estimeret_pris -= 0.20  # Natrabat
+                    estimeret_pris -= 0.20
                     
                 estimeret_pris = max(0.10, round(estimeret_pris, 2))
                 
