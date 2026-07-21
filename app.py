@@ -13,18 +13,16 @@ CACHE_DURATION = 600  # Gemmer data i 10 minutter (600 sekunder)
 def hent_spotpriser():
     global CACHE_DATA, CACHE_TIME
     
-    # Hvis vi har frisk data i cachen, så brug det med det samme!
     nu = time.time()
-    if CACHE_DATA and (nu - CACHE_TIME) < CACHE_DURATION:
+    # KUN brug cache hvis den indeholder REEL DATA
+    if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < CACHE_DURATION:
         print("--- BRUGER CACHED DATA ---")
         return CACHE_DATA
 
-    # Unik User-Agent så API'et ikke blokerer os
     headers = {
-        'User-Agent': 'MinPrivateElprisApp/2.0 (kontakt@minelpris.dk)'
+        'User-Agent': 'MinPrivateElprisApp/3.0 (kontakt@minelpris.dk)'
     }
     
-    # Hent de seneste rækker
     api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=200&sort=HourDK desc'
     print(f"--- KALDER API DOKUMENT: {api_url} ---")
     
@@ -52,11 +50,17 @@ def hent_spotpriser():
                     formatted[time_start]["price_dk1"] = price_dkk
                 elif area == "DK2":
                     formatted[time_start]["price_dk2"] = price_dkk
-                    
-            CACHE_DATA = list(formatted.values())
-            CACHE_TIME = nu
+            
+            resultat = list(formatted.values())
+            # GEM KUN I CACHE HVIS VI FIK TALLENE!
+            if len(resultat) > 0:
+                CACHE_DATA = resultat
+                CACHE_TIME = nu
+                print(f"--- SUCCES! GEMTE {len(resultat)} RÆKKER I CACHEN ---")
+            else:
+                print("--- ADVARSEL: Modtog 0 rækker fra API ---")
         else:
-            print(f"--- ADVARSEL: Modtog statuskode {res.status_code} fra Energi Data Service ---")
+            print(f"--- ADVARSEL: Modtog statuskode {res.status_code} ---")
             
     except Exception as e:
         print(f"--- API FEJL: {e} ---")
