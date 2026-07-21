@@ -14,13 +14,18 @@ def hent_spotpriser():
     global CACHE_DATA, CACHE_TIME
     
     nu = time.time()
-    # KUN brug cache hvis den indeholder REEL DATA
-    if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < CACHE_DURATION:
+    # 1. Hvis vi har rigtige data, gemmer vi i 10 minutter (600s)
+    if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < 600:
         print("--- BRUGER CACHED DATA ---")
         return CACHE_DATA
 
+    # 2. Hvis vi lige har ramt en fejl, VENTER vi 2 minutter (120s) før vi prøver igen
+    if CACHE_DATA == [] and (nu - CACHE_TIME) < 120:
+        print("--- PAUSER API-KALD (Aventer cooldown fra API) ---")
+        return []
+
     headers = {
-        'User-Agent': 'MinPrivateElprisApp/3.0 (kontakt@minelpris.dk)'
+        'User-Agent': 'MinPrivateElprisApp/4.0 (kontakt@minelpris.dk)'
     }
     
     api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=200&sort=HourDK desc'
@@ -51,18 +56,18 @@ def hent_spotpriser():
                 elif area == "DK2":
                     formatted[time_start]["price_dk2"] = price_dkk
             
-            resultat = list(formatted.values())
-            # GEM KUN I CACHE HVIS VI FIK TALLENE!
-            if len(resultat) > 0:
-                CACHE_DATA = resultat
-                CACHE_TIME = nu
-                print(f"--- SUCCES! GEMTE {len(resultat)} RÆKKER I CACHEN ---")
-            else:
-                print("--- ADVARSEL: Modtog 0 rækker fra API ---")
+            CACHE_DATA = list(formatted.values())
+            CACHE_TIME = nu
+            print(f"--- SUCCES! GEMTE {len(CACHE_DATA)} RÆKKER ---")
         else:
-            print(f"--- ADVARSEL: Modtog statuskode {res.status_code} ---")
+            # Hvis vi får 429 eller anden fejl, sætter vi en 2-minutters tænke-pause
+            CACHE_DATA = []
+            CACHE_TIME = nu
+            print("--- MODTOG FEJL: Sætter 2 minutters tænke-pause ---")
             
     except Exception as e:
+        CACHE_DATA = []
+        CACHE_TIME = nu
         print(f"--- API FEJL: {e} ---")
         
     return CACHE_DATA or []
