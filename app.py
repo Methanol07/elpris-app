@@ -1,61 +1,57 @@
 import os
-import time
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-CACHE_DATA = None
-CACHE_TIME = 0
-
-def hent_spotpriser():
-    global CACHE_DATA, CACHE_TIME
+def hent_priser_for_dato_og_omraade(dato_dt, price_area):
+    """Henter statisk JSON-fil fra elprisenligenu.dk"""
+    aar = dato_dt.strftime('%Y')
+    maaned = dato_dt.strftime('%m')
+    dag = dato_dt.strftime('%d')
     
-    nu = time.time()
-    # 1. Gem i cache i 5 minutter hvis vi har data
-    if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < 300:
-        return CACHE_DATA
-
-    headers = {'User-Agent': 'MinElprisApp/1.0'}
-    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=100&sort=HourDK desc'
+    url = f"https://www.elprisenligenu.dk/api/v1/prices/{aar}/{maaned}-{dag}_{price_area}.json"
     
-    print(f"--- KALDER API: {api_url} ---")
+    try:
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        print(f"Fejl ved hentning af {url}: {e}")
+        
+    return []
+
+def hent_samlet_dagsdata(dato_dt):
+    """Henter både DK1 og DK2 for den valgte dato og lægger dem sammen pr. time."""
+    data_dk1 = hent_priser_for_dato_og_omraade(dato_dt, "DK1")
+    data_dk2 = hent_priser_for_dato_og_omraade(dato_dt, "DK2")
     
     formatted = {}
-    try:
-        # Sæt timeout lavt (3 sek), så siden ikke hænger eller viser blank skærm
-        res = requests.get(api_url, headers=headers, timeout=3)
-        print(f"--- API STATUS KODE: {res.status_code} ---")
-        
-        if res.status_code == 200:
-            records = res.json().get('records', [])
-            for item in records:
-                time_start = item.get('HourDK', '')
-                area = item.get('PriceArea')
-                spot_eur = item.get('SpotPriceEUR')
-                
-                if spot_eur is None or not time_start or area not in ["DK1", "DK2"]:
-                    continue
-                    
-                price_dkk = round(((spot_eur * 7.45) / 1000) * 1.25, 2)
-                
-                if time_start not in formatted:
-                    formatted[time_start] = {"time_start": time_start, "price_dk1": None, "price_dk2": None}
-                
-                if area == "DK1":
-                    formatted[time_start]["price_dk1"] = price_dkk
-                elif area == "DK2":
-                    formatted[time_start]["price_dk2"] = price_dkk
-            
-            CACHE_DATA = list(formatted.values())
-            CACHE_TIME = nu
-            return CACHE_DATA
-    except Exception as e:
-        print(f"--- API FEJL / TIMEOUT: {e} ---")
-        
-    # Returner eksisterende cache hvis API svigter
-    return CACHE_DATA or []
+    
+    # Behandl DK1 (Priserne i API'et er i DKK/kWh ekskl. moms -> vi lægger 25% moms på (* 1.25))
+    for item in data_dk1:
+        time_start = item.get('time_start', '')[:16]
+        raw_price = item.get('DKK_per_kWh')
+        if raw_price is not None:
+            price_med_moms = round(raw_price * 1.25, 2)
+            formatted[time_start] = {"time_start": time_start, "price_dk1": price_med_moms, "price_dk2": None}
+
+    # Behandl DK2
+    for item in data_dk2:
+        time_start = item.get('time_start', '')[:16]
+        raw_price = item.get('DKK_per_kWh')
+        if raw_price is not None:
+            price_med_moms = round(raw_price * 1.25, 2)
+            if time_start not in formatted:
+                formatted[time_start] = {"time_start": time_start, "price_dk1": None, "price_dk2": price_med_moms}
+            else:
+                formatted[time_start]["price_dk2"] = price_med_moms
+
+    # Sorter efter tidspunkt
+    resultat = list(formatted.values())
+    resultat.sort(key=lambda x: x['time_start'])
+    return resultat
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -85,6 +81,8 @@ HTML_TEMPLATE = """
         .price-high { color: #f87171; font-weight: bold; }
         
         .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; line-height: 1.5; }
+        .attribution { text-align: center; margin-top: 25px; font-size: 0.8rem; color: #64748b; }
+        .attribution a { color: #38bdf8; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -112,7 +110,7 @@ HTML_TEMPLATE = """
             <tbody>
                 {% for row in priser %}
                 <tr>
-                    <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ')[:16] }}</td>
+                    <td style="color:#94a3b8;">{{ row.time_start.replace('T', ' kl. ') }}</td>
                     <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 1.0 %}price-cheap{% elif row.price_dk1 < 2.0 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                     </td>
@@ -125,9 +123,14 @@ HTML_TEMPLATE = """
         </table>
         {% else %}
         <div class="no-data">
-            ℹ️ Ingen data tilgængelige lige nu. Prøv at genopfriske siden om et øjeblik.
+            ℹ️ Ingen spotpriser fundet for <b>{{ mål_dato }}</b> endnu.<br>
+            <small>(Priser for i morgen udgives dagligt omkring kl. 13:00)</small>
         </div>
         {% endif %}
+
+        <div class="attribution">
+            Elpriser leveret af <a href="https://www.elprisenligenu.dk" target="_blank">Elprisen lige nu.dk</a>
+        </div>
     </div>
 </body>
 </html>
@@ -155,25 +158,16 @@ def dashboard():
             'dato_str': d.strftime('%d/%m')
         })
         
-    alle_data = hent_spotpriser()
-    
-    # Filtrer data på dato, hvis der er data – ellers vis hvad vi har
-    data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
-    if not data and alle_data:
-        data = alle_data
-        
-    data.sort(key=lambda x: str(x.get('time_start', '')))
+    data = hent_samlet_dagsdata(valgt_dato)
     
     return render_template_string(
         HTML_TEMPLATE,
         priser=data,
         valgt_offset=offset,
         dags_knapper=dags_knapper,
-        mål_dato=mål_dato_str,
-        str=str
+        mål_dato=mål_dato_str
     )
 
 if __name__ == '__main__':
-    # VIGTIGT: Hent porten direkte fra Renders miljøvariabler
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
