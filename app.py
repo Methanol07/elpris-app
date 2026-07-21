@@ -1,43 +1,44 @@
+import os
+import time
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
+CACHE_DATA = None
+CACHE_TIME = 0
+
 def hent_spotpriser():
-    """Henter elpriser direkte fra Elspotpris API (undgår Render IP-blokering)."""
-    # Vi henter for i dag og i morgen
-    idag = datetime.now()
-    fra_str = idag.strftime('%Y-%m-%d')
-    til_str = (idag + timedelta(days=2)).strftime('%Y-%m-%d')
+    global CACHE_DATA, CACHE_TIME
     
-    # Offentligt API uden rate-limit problemer på Render
-    api_url = f'https://api.elspotpris.dk/v1/prices?start={fra_str}&end={til_str}'
+    nu = time.time()
+    # 1. Gem i cache i 5 minutter hvis vi har data
+    if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < 300:
+        return CACHE_DATA
+
+    headers = {'User-Agent': 'MinElprisApp/1.0'}
+    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=100&sort=HourDK desc'
     
-    print(f"--- KALDER ELSPOTPRIS API: {api_url} ---")
+    print(f"--- KALDER API: {api_url} ---")
     
     formatted = {}
     try:
-        res = requests.get(api_url, timeout=10)
+        # Sæt timeout lavt (3 sek), så siden ikke hænger eller viser blank skærm
+        res = requests.get(api_url, headers=headers, timeout=3)
         print(f"--- API STATUS KODE: {res.status_code} ---")
         
         if res.status_code == 200:
-            records = res.json()
-            print(f"--- MODTOG {len(records)} RÆKKER ---")
-            
+            records = res.json().get('records', [])
             for item in records:
-                # Tidspunkt i ISO format (f.eks. 2026-07-21T00:00:00)
-                time_start = item.get('time_start', '')[:16]
-                area = item.get('price_area') # DK1 eller DK2
+                time_start = item.get('HourDK', '')
+                area = item.get('PriceArea')
+                spot_eur = item.get('SpotPriceEUR')
                 
-                # Elspotpris leverer direkte i DKK/kWh inkl/ekskl moms
-                # Vi bruger SpotPrice_DKK (ren spotpris)
-                price_dkk = item.get('SpotPrice_DKK')
-                
-                if price_dkk is None or not time_start:
+                if spot_eur is None or not time_start or area not in ["DK1", "DK2"]:
                     continue
-                
-                price_dkk = round(price_dkk, 2)
+                    
+                price_dkk = round(((spot_eur * 7.45) / 1000) * 1.25, 2)
                 
                 if time_start not in formatted:
                     formatted[time_start] = {"time_start": time_start, "price_dk1": None, "price_dk2": None}
@@ -46,11 +47,15 @@ def hent_spotpriser():
                     formatted[time_start]["price_dk1"] = price_dkk
                 elif area == "DK2":
                     formatted[time_start]["price_dk2"] = price_dkk
-                    
+            
+            CACHE_DATA = list(formatted.values())
+            CACHE_TIME = nu
+            return CACHE_DATA
     except Exception as e:
-        print(f"--- API FEJL: {e} ---")
+        print(f"--- API FEJL / TIMEOUT: {e} ---")
         
-    return list(formatted.values())
+    # Returner eksisterende cache hvis API svigter
+    return CACHE_DATA or []
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -85,7 +90,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>⚡ Elpriser Live</h1>
-        <p class="subtitle">Spotpriser i kr/kWh (ekskl. netselskab og afgifter)</p>
+        <p class="subtitle">Spotpriser inkl. moms i DKK/kWh</p>
         
         <div class="date-selector">
             {% for d in dags_knapper %}
@@ -107,11 +112,11 @@ HTML_TEMPLATE = """
             <tbody>
                 {% for row in priser %}
                 <tr>
-                    <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ') }}</td>
-                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ')[:16] }}</td>
+                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 1.0 %}price-cheap{% elif row.price_dk1 < 2.0 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                     </td>
-                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 0.8 %}price-cheap{% elif row.price_dk2 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 1.0 %}price-cheap{% elif row.price_dk2 < 2.0 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk2 if row.price_dk2 is not none else '-' }} kr.
                     </td>
                 </tr>
@@ -120,8 +125,7 @@ HTML_TEMPLATE = """
         </table>
         {% else %}
         <div class="no-data">
-            ℹ️ Ingen spotpriser fundet for <b>{{ mål_dato }}</b> endnu.<br>
-            <small>(Morgendagens priser udgives dagligt omkring kl. 13:00)</small>
+            ℹ️ Ingen data tilgængelige lige nu. Prøv at genopfriske siden om et øjeblik.
         </div>
         {% endif %}
     </div>
@@ -153,8 +157,11 @@ def dashboard():
         
     alle_data = hent_spotpriser()
     
-    # Filtrer på valgt dato
+    # Filtrer data på dato, hvis der er data – ellers vis hvad vi har
     data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
+    if not data and alle_data:
+        data = alle_data
+        
     data.sort(key=lambda x: str(x.get('time_start', '')))
     
     return render_template_string(
@@ -167,4 +174,6 @@ def dashboard():
     )
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # VIGTIGT: Hent porten direkte fra Renders miljøvariabler
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
