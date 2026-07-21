@@ -5,7 +5,6 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-# Cache variabler
 CACHE_DATA = None
 CACHE_TIME = 0
 
@@ -13,19 +12,18 @@ def hent_spotpriser():
     global CACHE_DATA, CACHE_TIME
     
     nu = time.time()
-    # Cache i 10 minutter hvis vi har data
+    # Gem i cache i 10 minutter
     if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < 600:
         return CACHE_DATA
 
-    # Hvis vi fik fejl sidst, vent 1 minut
-    if CACHE_DATA == [] and (nu - CACHE_TIME) < 60:
+    # Hvis vi ramte en fejl sidst, vent 30 sekunder
+    if CACHE_DATA == [] and (nu - CACHE_TIME) < 30:
         return []
 
-    headers = {'User-Agent': 'MinPrivateElprisApp/5.0'}
+    headers = {'User-Agent': 'MinPrivateElprisApp/6.0'}
     
-    # Hent præcis fra i dag og 2 dage frem
-    idag_str = datetime.now().strftime('%Y-%m-%d')
-    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={idag_str}&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourDK asc'
+    # Hent de seneste 500 rækker helt simpelt uden at smide filter-syntaks i URL'en
+    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=500&sort=HourDK desc'
     
     print(f"--- KALDER API: {api_url} ---")
     
@@ -36,6 +34,8 @@ def hent_spotpriser():
         
         if res.status_code == 200:
             records = res.json().get('records', [])
+            print(f"--- MODTOG {len(records)} RÆKKER FRA API ---")
+            
             for item in records:
                 time_start = item.get('HourDK', '')
                 area = item.get('PriceArea')
@@ -43,9 +43,13 @@ def hent_spotpriser():
                 
                 if spot_eur is None or not time_start:
                     continue
-                    
-                # Omregn EUR/MWh til DKK/kWh
-                price_dkk = round((spot_eur * 7.45) / 1000, 2)
+                
+                # Tag kun DK1 og DK2
+                if area not in ["DK1", "DK2"]:
+                    continue
+
+                # Omregn til DKK/kWh med moms
+                price_dkk = round(((spot_eur * 7.45) / 1000) * 1.25, 2)
                 
                 if time_start not in formatted:
                     formatted[time_start] = {"time_start": time_start, "price_dk1": None, "price_dk2": None}
@@ -57,7 +61,7 @@ def hent_spotpriser():
             
             CACHE_DATA = list(formatted.values())
             CACHE_TIME = nu
-            print(f"--- GEMTE {len(CACHE_DATA)} NATIONALE RÆKKER ---")
+            print(f"--- GEMTE {len(CACHE_DATA)} UNIKKE TIDSPUNKTER ---")
         else:
             CACHE_DATA = []
             CACHE_TIME = nu
@@ -102,7 +106,7 @@ HTML_TEMPLATE = """
 <body>
     <div class="container">
         <h1>⚡ Elpriser Live</h1>
-        <p class="subtitle">Direkte fra Energi Data Service</p>
+        <p class="subtitle">Priser inkl. moms i DKK/kWh</p>
         
         <div class="date-selector">
             {% for d in dags_knapper %}
@@ -125,10 +129,10 @@ HTML_TEMPLATE = """
                 {% for row in priser %}
                 <tr>
                     <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ')[:16] }}</td>
-                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 1.0 %}price-cheap{% elif row.price_dk1 < 2.0 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                     </td>
-                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 0.8 %}price-cheap{% elif row.price_dk2 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < 1.0 %}price-cheap{% elif row.price_dk2 < 2.0 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk2 if row.price_dk2 is not none else '-' }} kr.
                     </td>
                 </tr>
@@ -138,7 +142,7 @@ HTML_TEMPLATE = """
         {% else %}
         <div class="no-data">
             ℹ️ Ingen spotpriser fundet for <b>{{ mål_dato }}</b> endnu.<br>
-            <small>(Spotpriser for næste døgn udgives dagligt omkring kl. 13:00)</small>
+            <small>(Spotpriser for i morgen udgives dagligt omkring kl. 13:00)</small>
         </div>
         {% endif %}
     </div>
@@ -170,7 +174,7 @@ def dashboard():
         
     alle_data = hent_spotpriser()
     
-    # Filtrer strictly på den valgte dato
+    # Filtrer på dato
     data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
     data.sort(key=lambda x: str(x.get('time_start', '')))
     
