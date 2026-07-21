@@ -5,31 +5,29 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-# Global cache variabler
+# Cache variabler
 CACHE_DATA = None
 CACHE_TIME = 0
-CACHE_DURATION = 600  # Gemmer data i 10 minutter (600 sekunder)
 
 def hent_spotpriser():
     global CACHE_DATA, CACHE_TIME
     
     nu = time.time()
-    # 1. Hvis vi har rigtige data, gemmer vi i 10 minutter (600s)
+    # Cache i 10 minutter hvis vi har data
     if CACHE_DATA and len(CACHE_DATA) > 0 and (nu - CACHE_TIME) < 600:
-        print("--- BRUGER CACHED DATA ---")
         return CACHE_DATA
 
-    # 2. Hvis vi lige har ramt en fejl, VENTER vi 2 minutter (120s) før vi prøver igen
-    if CACHE_DATA == [] and (nu - CACHE_TIME) < 120:
-        print("--- PAUSER API-KALD (Aventer cooldown fra API) ---")
+    # Hvis vi fik fejl sidst, vent 1 minut
+    if CACHE_DATA == [] and (nu - CACHE_TIME) < 60:
         return []
 
-    headers = {
-        'User-Agent': 'MinPrivateElprisApp/4.0 (kontakt@minelpris.dk)'
-    }
+    headers = {'User-Agent': 'MinPrivateElprisApp/5.0'}
     
-    api_url = 'https://api.energidataservice.dk/dataset/Elspotprices?limit=200&sort=HourDK desc'
-    print(f"--- KALDER API DOKUMENT: {api_url} ---")
+    # Hent præcis fra i dag og 2 dage frem
+    idag_str = datetime.now().strftime('%Y-%m-%d')
+    api_url = f'https://api.energidataservice.dk/dataset/Elspotprices?start={idag_str}&filter={{"PriceArea":["DK1","DK2"]}}&sort=HourDK asc'
+    
+    print(f"--- KALDER API: {api_url} ---")
     
     formatted = {}
     try:
@@ -46,6 +44,7 @@ def hent_spotpriser():
                 if spot_eur is None or not time_start:
                     continue
                     
+                # Omregn EUR/MWh til DKK/kWh
                 price_dkk = round((spot_eur * 7.45) / 1000, 2)
                 
                 if time_start not in formatted:
@@ -58,12 +57,10 @@ def hent_spotpriser():
             
             CACHE_DATA = list(formatted.values())
             CACHE_TIME = nu
-            print(f"--- SUCCES! GEMTE {len(CACHE_DATA)} RÆKKER ---")
+            print(f"--- GEMTE {len(CACHE_DATA)} NATIONALE RÆKKER ---")
         else:
-            # Hvis vi får 429 eller anden fejl, sætter vi en 2-minutters tænke-pause
             CACHE_DATA = []
             CACHE_TIME = nu
-            print("--- MODTOG FEJL: Sætter 2 minutters tænke-pause ---")
             
     except Exception as e:
         CACHE_DATA = []
@@ -87,6 +84,7 @@ HTML_TEMPLATE = """
         
         .date-selector { display: flex; gap: 8px; justify-content: center; margin-bottom: 20px; flex-wrap: wrap; }
         .date-btn { padding: 10px 14px; background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 0.85rem; }
+        .date-btn:hover { background: #334155; color: white; }
         .date-btn.active { background: #0284c7; color: white; border-color: #38bdf8; }
         
         table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }
@@ -98,7 +96,7 @@ HTML_TEMPLATE = """
         .price-mid { color: #facc15; font-weight: bold; }
         .price-high { color: #f87171; font-weight: bold; }
         
-        .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; }
+        .no-data { text-align: center; padding: 30px; background: #1e293b; border-radius: 12px; color: #94a3b8; line-height: 1.5; }
     </style>
 </head>
 <body>
@@ -126,7 +124,7 @@ HTML_TEMPLATE = """
             <tbody>
                 {% for row in priser %}
                 <tr>
-                    <td style="color:#94a3b8;">{{ row.time_start.replace('T', ' kl. ')[:16] }}</td>
+                    <td style="color:#94a3b8;">{{ str(row.time_start).replace('T', ' kl. ')[:16] }}</td>
                     <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < 0.8 %}price-cheap{% elif row.price_dk1 < 1.5 %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                     </td>
@@ -139,8 +137,8 @@ HTML_TEMPLATE = """
         </table>
         {% else %}
         <div class="no-data">
-            ℹ️ Ingen data tilgængelige for datoen <b>{{ mål_dato }}</b> endnu.<br>
-            <small>(Spotpriser udgives dagligt omkring kl. 13:00)</small>
+            ℹ️ Ingen spotpriser fundet for <b>{{ mål_dato }}</b> endnu.<br>
+            <small>(Spotpriser for næste døgn udgives dagligt omkring kl. 13:00)</small>
         </div>
         {% endif %}
     </div>
@@ -161,7 +159,7 @@ def dashboard():
     
     dags_knapper = []
     labels = ["I dag", "I morgen"]
-    for i in range(4):
+    for i in range(3):
         d = idag + timedelta(days=i)
         lbl = labels[i] if i < len(labels) else f"+{i} dage"
         dags_knapper.append({
@@ -172,13 +170,8 @@ def dashboard():
         
     alle_data = hent_spotpriser()
     
-    # Prøv at filtrere på den valgte dato
+    # Filtrer strictly på den valgte dato
     data = [r for r in alle_data if str(r.get('time_start', '')).startswith(mål_dato_str)]
-    
-    # Hvis datomatch var tom, viser vi bare ALLE hentede rækker i stedet for en tom skærm!
-    if not data and alle_data:
-        data = alle_data
-        
     data.sort(key=lambda x: str(x.get('time_start', '')))
     
     return render_template_string(
@@ -186,7 +179,8 @@ def dashboard():
         priser=data,
         valgt_offset=offset,
         dags_knapper=dags_knapper,
-        mål_dato=mål_dato_str
+        mål_dato=mål_dato_str,
+        str=str
     )
 
 if __name__ == '__main__':
