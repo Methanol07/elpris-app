@@ -7,18 +7,18 @@ app = Flask(__name__)
 
 def beregn_nettarif_og_afgift(time_hour):
     """
-    Estimerer elafgift og nettarif (inkl. 25% moms) ud fra tidspunkt på døgnet.
-    Afgift: ca. 0.76 DKK/kWh
-    Tarif: Varierer (Lav om natten, høj om aftenen)
+    Matchet direkte med din el-app:
+    - Elafgift: 0,01 kr.
+    - Tariffer/Transport: 0,25 kr. om natten/dagen op til 0,57 kr. i spidsbelastningen.
     """
-    elafgift = 0.76
+    elafgift = 0.01  # Sommer-elafgift
     
     if 0 <= time_hour < 6:
-        nettarif = 0.20  # Nat
+        nettarif = 0.25  # Nat (Laveste omkostning: ~0,26 kr samlet)
     elif 17 <= time_hour < 21:
-        nettarif = 0.85  # Aftenspids
+        nettarif = 0.57  # Aftenspids (Højeste omkostning: ~0,58 kr samlet)
     else:
-        nettarif = 0.35  # Dag/Aften
+        nettarif = 0.33  # Dag/Middag
         
     return elafgift + nettarif
 
@@ -172,7 +172,7 @@ HTML_TEMPLATE = """
         <h1>⚡ Elpriser & Prognose</h1>
         <p class="subtitle">
             {% if med_afgifter %}
-                <b>Inkl. Elafgift & Nettariffer (Slutpris)</b>
+                <b>Inkl. Elafgift & Nettariffer (Estimeret Slutpris)</b>
             {% else %}
                 <b>Ren Spotpris (Inkl. moms)</b>
             {% endif %}
@@ -210,11 +210,11 @@ HTML_TEMPLATE = """
                 {% for row in priser %}
                 <tr>
                     <td style="color:#94a3b8;">{{ row.time_start.replace('T', ' kl. ') }}</td>
-                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < (1.5 if not med_afgifter else 2.5) %}price-cheap{% elif row.price_dk1 < (2.5 if not med_afgifter else 3.5) %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td class="{% if row.price_dk1 is not none %}{% if row.price_dk1 < (1.0 if not med_afgifter else 1.5) %}price-cheap{% elif row.price_dk1 < (1.8 if not med_afgifter else 2.3) %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk1 if row.price_dk1 is not none else '-' }} kr.
                         {% if er_prognose %}<span class="badge-forecast">Est.</span>{% endif %}
                     </td>
-                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < (1.5 if not med_afgifter else 2.5) %}price-cheap{% elif row.price_dk2 < (2.5 if not med_afgifter else 3.5) %}price-mid{% else %}price-high{% endif %}{% endif %}">
+                    <td class="{% if row.price_dk2 is not none %}{% if row.price_dk2 < (1.0 if not med_afgifter else 1.5) %}price-cheap{% elif row.price_dk2 < (1.8 if not med_afgifter else 2.3) %}price-mid{% else %}price-high{% endif %}{% endif %}">
                         {{ row.price_dk2 if row.price_dk2 is not none else '-' }} kr.
                         {% if er_prognose %}<span class="badge-forecast">Est.</span>{% endif %}
                     </td>
